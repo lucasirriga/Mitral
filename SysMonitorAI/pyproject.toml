@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "SysMonitorAI"
+version = "1.0.0"
+description = "Monitor de sistema inteligente com detecção de anomalias via IA"
+requires-python = ">=3.10"
+dependencies = [
+    "psutil>=5.9.0",
+    "customtkinter>=5.2.0",
+    "pandas>=1.5.0",
+    "scikit-learn>=1.2.0",
+    "matplotlib>=3.6.0",
+    "plyer>=2.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"

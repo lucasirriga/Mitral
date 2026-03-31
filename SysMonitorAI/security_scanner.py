@@ -1,52 +1,64 @@
+"""Módulo de escaneamento heurístico contra malwares."""
+
+import logging
+import platform
+from typing import Any
+
 import psutil
-import os
+
+from config import HIGH_CPU_THRESHOLD, SYSTEM_PATHS, SUSPICIOUS_PATHS
+
+logger = logging.getLogger(__name__)
+
 
 class SecurityScanner:
-    def __init__(self):
-        # Lista the processos falsificados comumente por malwares
-        self.critical_system_binaries = ["svchost.exe", "explorer.exe", "winlogon.exe", "csrss.exe", "lsass.exe", "smss.exe", "services.exe", "spoolsv.exe"]
-        
-        # Onde eles devem rodar
-        self.system_paths = ["c:\\windows\\system32", "c:\\windows\\syswow64", "c:\\windows"]
+    """Detecta processos suspeitos via heurísticas de segurança."""
 
-    def scan_running_processes(self):
-        alerts = []
+    def __init__(self) -> None:
+        self.critical_system_binaries: list[str] = [
+            "svchost.exe", "explorer.exe", "winlogon.exe", "csrss.exe",
+            "lsass.exe", "smss.exe", "services.exe", "spoolsv.exe",
+        ]
+        self._is_windows = platform.system() == "Windows"
+
+    def scan_running_processes(self) -> list[dict[str, Any]]:
+        """Escaneia processos em execução em busca de comportamento malicioso."""
+        alerts: list[dict[str, Any]] = []
         for proc in psutil.process_iter(['pid', 'name', 'exe', 'cpu_percent']):
             try:
                 name = proc.info['name']
                 exe = proc.info.get('exe')
-                
+
                 if not name or not exe:
                     continue
-                    
+
                 name_lower = name.lower()
                 exe_lower = exe.lower()
-                
-                # Heurística 1: Spoofing (Processo Core do Windows rodando fora do local oficial)
-                if name_lower in self.critical_system_binaries:
-                    is_in_sys_path = any(exe_lower.startswith(sp) for sp in self.system_paths)
+
+                # Heurística 1: Spoofing (processo crítico rodando fora do local oficial)
+                if self._is_windows and name_lower in self.critical_system_binaries:
+                    is_in_sys_path = any(exe_lower.startswith(sp) for sp in SYSTEM_PATHS)
                     if not is_in_sys_path:
                         alerts.append({
                             "type": "SPOOFING",
                             "name": name,
                             "pid": proc.info['pid'],
                             "path": exe,
-                            "desc": f"Processo crítico de sistema rodando de local inesperado!"
+                            "desc": "Processo crítico de sistema rodando de local inesperado!",
                         })
-                
-                # Heurística 2: Minerador escondido ou Malware rodando da pasta Temp/AppData chupando muita CPU
-                suspicious_paths = ["\\appdata\\", "\\temp\\", "\\programdata\\"]
-                if any(sp in exe_lower for sp in suspicious_paths):
-                    # Se usa mais de 50% de CPU instantâneo fora das pastas comuns
-                    if proc.info['cpu_percent'] and proc.info['cpu_percent'] > 50.0:
+
+                # Heurística 2: Minerador/malware em pasta suspeita com alto consumo de CPU
+                if any(sp in exe_lower for sp in SUSPICIOUS_PATHS):
+                    cpu = proc.info['cpu_percent']
+                    if cpu and cpu > HIGH_CPU_THRESHOLD:
                         alerts.append({
                             "type": "MINER/RANSOMWARE SUSPECT",
                             "name": name,
                             "pid": proc.info['pid'],
                             "path": exe,
-                            "desc": f"Software rodando em pasta temporária (usada por malwares) com ALTÍSSIMO consumo de CPU."
+                            "desc": "Software em pasta temporária com altíssimo consumo de CPU.",
                         })
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 pass
-                
+
         return alerts
