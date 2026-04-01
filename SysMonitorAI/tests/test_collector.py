@@ -117,3 +117,67 @@ class TestSystemCollector:
             "disk_io_read": 100, "disk_io_write": 200,
         }
         collector.save_metrics(sys_metrics, [])
+
+    def test_wal_mode_enabled(self, collector):
+        """WAL mode deve estar habilitado no banco."""
+        import sqlite3
+        conn = sqlite3.connect(collector.db_path)
+        row = conn.execute("PRAGMA journal_mode").fetchone()
+        conn.close()
+        assert row[0] == "wal"
+
+    def test_indices_created(self, collector):
+        """Índices de timestamp devem existir."""
+        import sqlite3
+        conn = sqlite3.connect(collector.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        indices = {row[0] for row in cursor.fetchall()}
+        conn.close()
+        assert "idx_sys_ts" in indices
+        assert "idx_proc_ts" in indices
+
+    def test_get_all_permissions_empty(self, collector):
+        """Lista de permissões deve ser vazia inicialmente."""
+        result = collector.get_all_permissions()
+        assert result == []
+
+    def test_get_all_permissions_returns_all(self, collector):
+        """Deve retornar todas as permissões registradas."""
+        collector.register_permission("a.exe", allowed=True)
+        collector.register_permission("b.exe", allowed=False)
+        result = collector.get_all_permissions()
+        names = {p["name"] for p in result}
+        assert names == {"a.exe", "b.exe"}
+
+    def test_revoke_permission(self, collector):
+        """Revogar deve remover o registro do banco."""
+        collector.register_permission("app.exe", allowed=True)
+        collector.revoke_permission("app.exe")
+        perms = collector.get_permission("app.exe")
+        assert perms == {"allowed_count": 0, "denied_count": 0}
+
+    def test_collect_processes_filters_idle(self, collector):
+        """Processos com CPU e RAM abaixo do threshold não devem ser retornados."""
+        from unittest.mock import MagicMock, patch
+        mock_proc = MagicMock()
+        mock_proc.info = {
+            "pid": 1, "name": "idle.exe",
+            "cpu_percent": 0.0, "memory_percent": 0.1,
+        }
+        with patch("collector.psutil.process_iter", return_value=[mock_proc]):
+            procs = collector.collect_processes()
+        assert len(procs) == 0
+
+    def test_collect_processes_includes_active(self, collector):
+        """Processos com consumo relevante devem ser incluídos."""
+        from unittest.mock import MagicMock, patch
+        mock_proc = MagicMock()
+        mock_proc.info = {
+            "pid": 99, "name": "heavy.exe",
+            "cpu_percent": 5.0, "memory_percent": 2.0,
+        }
+        with patch("collector.psutil.process_iter", return_value=[mock_proc]):
+            procs = collector.collect_processes()
+        assert len(procs) == 1
+        assert procs[0]["name"] == "heavy.exe"

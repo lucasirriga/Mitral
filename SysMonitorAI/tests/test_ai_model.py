@@ -50,9 +50,9 @@ class TestSysMonitorAI:
         assert ai.train_model() is True
         assert ai.is_trained is True
 
-    def test_train_without_data(self, empty_db):
+    def test_train_without_data(self, empty_db, tmp_path):
         """Modelo não deve treinar sem dados."""
-        ai = SysMonitorAI(db_path=empty_db)
+        ai = SysMonitorAI(db_path=empty_db, model_path=str(tmp_path / "model.pkl"))
         assert ai.train_model() is False
         assert ai.is_trained is False
 
@@ -63,9 +63,9 @@ class TestSysMonitorAI:
         result = ai.predict_anomaly(30.0, 50.0, 5000, 5000)
         assert isinstance(result, bool)
 
-    def test_predict_untrained_returns_false(self, empty_db):
+    def test_predict_untrained_returns_false(self, empty_db, tmp_path):
         """Sem treino, deve retornar False (assuma normalidade)."""
-        ai = SysMonitorAI(db_path=empty_db)
+        ai = SysMonitorAI(db_path=empty_db, model_path=str(tmp_path / "model.pkl"))
         result = ai.predict_anomaly(99.0, 99.0, 999999, 999999)
         assert result is False
 
@@ -103,3 +103,21 @@ class TestSysMonitorAI:
         df = ai.get_evolution_data()
         assert not df.empty
         assert "ai_score" in df.columns
+
+    def test_model_persistence(self, db_with_data, tmp_path):
+        """Modelo treinado deve ser salvo e restaurado entre instâncias."""
+        model_path = str(tmp_path / "model.pkl")
+
+        ai1 = SysMonitorAI(db_path=db_with_data, model_path=model_path)
+        ai1.train_model()
+        assert ai1.is_trained is True
+
+        # Nova instância deve restaurar o modelo
+        ai2 = SysMonitorAI(db_path=db_with_data, model_path=model_path)
+        assert ai2.is_trained is True
+
+    def test_no_model_file_starts_untrained(self, empty_db, tmp_path):
+        """Sem arquivo de modelo, a instância deve iniciar não-treinada."""
+        model_path = str(tmp_path / "nonexistent_model.pkl")
+        ai = SysMonitorAI(db_path=empty_db, model_path=model_path)
+        assert ai.is_trained is False

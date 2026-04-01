@@ -6,10 +6,9 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Any
 
-import pandas as pd
 import psutil
 
-from config import DB_PATH, DATA_RETENTION_DAYS
+from config import DB_PATH, DATA_RETENTION_DAYS, PROCESS_CPU_THRESHOLD, PROCESS_MEM_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +35,11 @@ class SystemCollector:
             conn.close()
 
     def _init_db(self) -> None:
-        """Cria as tabelas do banco caso não existam."""
+        """Cria as tabelas, índices e configura WAL mode."""
         with self._get_connection() as conn:
+            # WAL mode: permite leitura e escrita simultâneas sem bloqueio
+            conn.execute("PRAGMA journal_mode=WAL")
+
             cursor = conn.cursor()
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS system_metrics (
@@ -67,6 +69,14 @@ class SystemCollector:
                 )
             ''')
 
+            # Índices para acelerar queries de timestamp e id
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sys_ts ON system_metrics(timestamp)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_proc_ts ON process_metrics(timestamp)"
+            )
+
     def get_permission(self, process_name: str) -> dict[str, int]:
         """Retorna contadores de permissão para um processo."""
         with self._get_connection() as conn:
@@ -79,6 +89,19 @@ class SystemCollector:
         if row:
             return {"allowed_count": row[0], "denied_count": row[1]}
         return {"allowed_count": 0, "denied_count": 0}
+
+    def get_all_permissions(self) -> list[dict[str, Any]]:
+        """Retorna todas as permissões registradas."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT name, allowed_count, denied_count FROM user_permissions ORDER BY name"
+            )
+            rows = cursor.fetchall()
+        return [
+            {"name": row[0], "allowed_count": row[1], "denied_count": row[2]}
+            for row in rows
+        ]
 
     def register_permission(self, process_name: str, allowed: bool) -> None:
         """Registra uma decisão de permissão do usuário."""
@@ -97,6 +120,14 @@ class SystemCollector:
                     ON CONFLICT(name) DO UPDATE SET denied_count = denied_count + 1
                 ''', (process_name,))
 
+    def revoke_permission(self, process_name: str) -> None:
+        """Remove o histórico de permissão de um processo."""
+        with self._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM user_permissions WHERE name=?", (process_name,)
+            )
+        logger.info("Permissão revogada: '%s'.", process_name)
+
     def collect_system_metrics(self) -> dict[str, Any]:
         """Coleta métricas gerais do sistema (CPU, RAM, Disco)."""
         cpu = psutil.cpu_percent(interval=None)
@@ -112,32 +143,61 @@ class SystemCollector:
         }
 
     def collect_processes(self) -> list[dict[str, Any]]:
-        """Coleta métricas de cada processo em execução."""
+        """Coleta métricas de processos relevantes (filtra processos ociosos)."""
         processes = []
         now = datetime.datetime.now().isoformat()
         for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
             try:
                 pinfo = proc.info
+                cpu = pinfo['cpu_percent'] or 0.0
+                mem = pinfo['memory_percent'] or 0.0
+
+                # Salva apenas processos com consumo relevante
+                if cpu < PROCESS_CPU_THRESHOLD and mem < PROCESS_MEM_THRESHOLD:
+                    continue
+
                 processes.append({
                     "timestamp": now,
                     "pid": pinfo['pid'],
                     "name": pinfo['name'],
-                    "cpu_percent": pinfo['cpu_percent'] or 0.0,
-                    "memory_percent": pinfo['memory_percent'] or 0.0,
+                    "cpu_percent": cpu,
+                    "memory_percent": mem,
                 })
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 pass
         return processes
 
     def save_metrics(self, sys_metrics: dict[str, Any], proc_metrics: list[dict[str, Any]]) -> None:
-        """Salva métricas do sistema e processos em uma única transação atômica."""
+        """Salva métricas em uma única transação atômica (sem pandas)."""
         with self._get_connection() as conn:
-            system_df = pd.DataFrame([sys_metrics])
-            system_df.to_sql('system_metrics', conn, if_exists='append', index=False)
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "INSERT INTO system_metrics "
+                "(timestamp, cpu_percent, memory_percent, disk_io_read, disk_io_write) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    sys_metrics["timestamp"],
+                    sys_metrics["cpu_percent"],
+                    sys_metrics["memory_percent"],
+                    sys_metrics["disk_io_read"],
+                    sys_metrics["disk_io_write"],
+                ),
+            )
 
             if proc_metrics:
-                proc_df = pd.DataFrame(proc_metrics)
-                proc_df.to_sql('process_metrics', conn, if_exists='append', index=False)
+                cursor.executemany(
+                    "INSERT INTO process_metrics "
+                    "(timestamp, pid, name, cpu_percent, memory_percent) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [
+                        (
+                            p["timestamp"], p["pid"], p["name"],
+                            p["cpu_percent"], p["memory_percent"],
+                        )
+                        for p in proc_metrics
+                    ],
+                )
 
     def cleanup_old_data(self) -> None:
         """Remove dados mais antigos que DATA_RETENTION_DAYS."""
@@ -148,10 +208,12 @@ class SystemCollector:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM system_metrics WHERE timestamp < ?", (cutoff,))
+                sys_deleted = cursor.rowcount
                 cursor.execute("DELETE FROM process_metrics WHERE timestamp < ?", (cutoff,))
-                deleted = cursor.rowcount
-                if deleted > 0:
-                    logger.info("Limpeza: %d registros antigos removidos.", deleted)
+                proc_deleted = cursor.rowcount
+                total = sys_deleted + proc_deleted
+                if total > 0:
+                    logger.info("Limpeza: %d registros antigos removidos.", total)
         except Exception as e:
             logger.error("Erro na limpeza de dados antigos: %s", e)
 
@@ -177,4 +239,4 @@ if __name__ == "__main__":
     logger.info("Coletando métricas de teste...")
     sys_data, proc_data = collector.step()
     logger.info("Sistema: %s", sys_data)
-    logger.info("Total de processos guardados: %d", len(proc_data))
+    logger.info("Total de processos salvos: %d", len(proc_data))

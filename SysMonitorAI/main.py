@@ -3,7 +3,6 @@
 import logging
 import signal
 import threading
-import time
 from typing import Any
 
 import customtkinter as ctk
@@ -83,14 +82,13 @@ class SysMonitorApp:
                             if action_state == "AUTO_MITIGATED":
                                 new_metrics['mitigated'] = True
 
-                            # Notificação desktop
                             self.notifier.send_anomaly_alert(
                                 culprit['name'],
                                 culprit['memory_percent'],
                                 culprit['cpu_percent'],
                             )
 
-                # Atualiza dados de evolução para cache (evita query na thread UI)
+                # Atualiza cache de evolução (evita query na thread UI)
                 evolution_df = self.ai.get_evolution_data()
 
                 with self._lock:
@@ -108,8 +106,10 @@ class SysMonitorApp:
 
             self._stop_event.wait(timeout=BACKEND_INTERVAL)
 
+    # ── Métodos de acesso thread-safe ──────────────────────────────────────────
+
     def get_latest_metrics(self) -> dict[str, Any]:
-        """Retorna as métricas mais recentes (thread-safe)."""
+        """Retorna as métricas mais recentes."""
         with self._lock:
             return self._latest_metrics.copy()
 
@@ -127,14 +127,24 @@ class SysMonitorApp:
         self.action_manager.resolve_permission(name, pid, allowed)
 
     def get_security_alerts(self) -> list[dict[str, Any]]:
-        """Retorna os alertas de segurança atuais (thread-safe)."""
+        """Retorna os alertas de segurança atuais."""
         with self._lock:
             return list(self._security_alerts)
 
     def get_cached_evolution_data(self) -> pd.DataFrame:
-        """Retorna os dados de evolução cacheados (thread-safe, sem query no banco)."""
+        """Retorna os dados de evolução cacheados (sem query no banco)."""
         with self._lock:
             return self._cached_evolution.copy()
+
+    def get_all_permissions(self) -> list[dict[str, Any]]:
+        """Retorna todas as permissões aprendidas do banco de dados."""
+        return self.collector.get_all_permissions()
+
+    def revoke_permission(self, process_name: str) -> None:
+        """Remove o histórico de permissão de um processo."""
+        self.collector.revoke_permission(process_name)
+
+    # ── Ciclo de vida ──────────────────────────────────────────────────────────
 
     def start(self) -> None:
         """Inicia a aplicação: backend em thread separada + GUI na thread principal."""
@@ -143,7 +153,6 @@ class SysMonitorApp:
         self._bg_thread = threading.Thread(target=self.run_backend, daemon=True)
         self._bg_thread.start()
 
-        # Handler para SIGINT (Ctrl+C)
         signal.signal(signal.SIGINT, lambda sig, frame: self._shutdown())
 
         ctk.set_appearance_mode("dark")

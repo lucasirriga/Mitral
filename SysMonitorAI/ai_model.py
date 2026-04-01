@@ -6,6 +6,7 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Any
 
+import joblib
 import pandas as pd
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
@@ -13,6 +14,7 @@ from sklearn.preprocessing import StandardScaler
 from config import (
     DB_PATH,
     MIN_TRAINING_SAMPLES,
+    MODEL_PATH,
     RETRAIN_INTERVAL,
     TRAINING_WINDOW,
     CHART_POINTS,
@@ -26,13 +28,17 @@ FEATURE_COLS = ['cpu_percent', 'memory_percent', 'disk_io_read', 'disk_io_write'
 class SysMonitorAI:
     """Motor de IA para detecção de anomalias no sistema usando Isolation Forest."""
 
-    def __init__(self, db_path: str = DB_PATH) -> None:
+    def __init__(self, db_path: str = DB_PATH, model_path: str = MODEL_PATH) -> None:
         self.db_path = db_path
+        self.model_path = model_path
         self.model = IsolationForest(contamination='auto', random_state=42)
         self.scaler = StandardScaler()
         self.is_trained: bool = False
         self.predict_count: int = 0
         self.my_pid: int = os.getpid()
+
+        # Tenta restaurar modelo salvo anteriormente
+        self._load_model()
 
     @contextmanager
     def _get_connection(self):
@@ -42,6 +48,27 @@ class SysMonitorAI:
             yield conn
         finally:
             conn.close()
+
+    def save_model(self) -> None:
+        """Persiste o modelo e o scaler em disco."""
+        try:
+            joblib.dump({"model": self.model, "scaler": self.scaler}, self.model_path)
+            logger.info("Modelo salvo em '%s'.", self.model_path)
+        except Exception as e:
+            logger.error("Erro ao salvar modelo: %s", e)
+
+    def _load_model(self) -> None:
+        """Restaura modelo e scaler do disco, se disponíveis."""
+        if not os.path.exists(self.model_path):
+            return
+        try:
+            payload = joblib.load(self.model_path)
+            self.model = payload["model"]
+            self.scaler = payload["scaler"]
+            self.is_trained = True
+            logger.info("Modelo restaurado de '%s'.", self.model_path)
+        except Exception as e:
+            logger.warning("Não foi possível restaurar modelo: %s", e)
 
     def get_training_data(self) -> pd.DataFrame:
         """Busca dados históricos para treino do modelo."""
@@ -64,6 +91,7 @@ class SysMonitorAI:
             scaled = self.scaler.fit_transform(df)
             self.model.fit(scaled)
             self.is_trained = True
+            self.save_model()
             return True
         return False
 
